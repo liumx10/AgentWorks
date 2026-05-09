@@ -4,18 +4,13 @@
   const state = window.__AGENT_TALK_STATE__;
 
   const ui = {
-    mode: state.mode,
-    messages: state.messages,
-    attachedContext: state.attachedContext,
-    workflow: state.workflow,
-    agentPreference: state.agentPreference,
-    isResponding: state.isResponding,
-    isCancelling: state.isCancelling,
-    needsArbitration: state.needsArbitration,
-    arbitrationSummary: state.arbitrationSummary
+    tasks: state.tasks,
+    activeTaskId: state.activeTaskId,
+    activeTask: state.activeTask
   };
   const collapsedMessages = new Set();
   const collapsedProcesses = new Set();
+  const draftsByTaskId = new Map();
   let renderQueued = false;
 
   function scheduleRender() {
@@ -30,30 +25,55 @@
     });
   }
 
+  function activeChat() {
+    return ui.activeTask.chat;
+  }
+
+  function currentDraft() {
+    return draftsByTaskId.get(ui.activeTaskId) ?? "";
+  }
+
+  function setCurrentDraft(value) {
+    draftsByTaskId.set(ui.activeTaskId, value);
+  }
+
   function render() {
-    const controlsDisabled = ui.isResponding ? "disabled" : "";
-    const sendDisabled = ui.isResponding ? "disabled" : "";
-    const cancelDisabled = !ui.isResponding || ui.isCancelling ? "disabled" : "";
+    const chat = activeChat();
+    const controlsDisabled = chat.isResponding ? "disabled" : "";
+    const sendDisabled = chat.isResponding ? "disabled" : "";
+    const cancelDisabled = !chat.isResponding || chat.isCancelling ? "disabled" : "";
 
     app.innerHTML = `
       <div class="app-shell">
-        <header class="chat-header">
-          <p class="eyebrow">AgentWorks</p>
-          <div class="header-line">
-            <h1>Discussion</h1>
-            <div class="chip-stack">
-              <span class="status-chip">${escapeHtml(ui.workflow.title)}</span>
-              <span class="status-chip ${ui.attachedContext ? "" : "muted"}">${escapeHtml(renderContextSummary())}</span>
-            </div>
+        <section class="task-strip">
+          <div class="task-scroller">
+            ${ui.tasks.map(renderTaskTab).join("")}
           </div>
-        </header>
+          <button id="createTaskButton" class="subtle task-create">New</button>
+        </section>
 
-        <main id="messages" class="chat-thread">
-          ${ui.messages.map(renderMessage).join("")}
+        <main class="chat-stage">
+          <section class="task-header">
+            <input
+              id="taskTitleInput"
+              class="task-title-input"
+              value="${escapeAttribute(ui.activeTask.title)}"
+              ${chat.isResponding ? "disabled" : ""}
+            />
+            <div class="chip-stack">
+              <span class="status-chip">${escapeHtml(chat.workflow.title)}</span>
+              <span class="status-chip">${escapeHtml(renderPhaseLabel(chat.phase))}</span>
+              <span class="status-chip ${chat.attachedContext ? "" : "muted"}">${escapeHtml(renderContextSummary())}</span>
+            </div>
+          </section>
+
+          <section id="messages" class="chat-thread">
+            ${chat.messages.map(renderMessage).join("")}
+          </section>
         </main>
 
         <footer class="composer">
-          <div class="control-dock">
+          <div class="control-dock control-dock-top">
             <div class="dock-fields">
               <label class="field compact">
                 <span>Mode</span>
@@ -74,7 +94,7 @@
               <label class="field compact checkbox-field">
                 <span>Solo</span>
                 <input id="singleAgentModeToggle" type="checkbox" ${
-                  ui.agentPreference.singleAgentMode ? "checked" : ""
+                  chat.agentPreference.singleAgentMode ? "checked" : ""
                 } ${controlsDisabled} />
               </label>
             </div>
@@ -83,34 +103,31 @@
               <button id="attachFileButton" class="subtle" ${controlsDisabled}>File</button>
               <button id="clearContextButton" class="subtle" ${controlsDisabled}>Detach</button>
               <button id="clearButton" class="subtle" ${controlsDisabled}>Clear</button>
+              <button id="closeTaskButton" class="subtle" ${chat.isResponding ? "disabled" : ""}>Close Task</button>
             </div>
           </div>
           ${
-            ui.isResponding
-              ? `<div class="status-banner">${escapeHtml(
-                  ui.isCancelling
-                    ? "Cancelling the current discussion..."
-                    : `${capitalize(ui.agentPreference.primaryAgent)} is leading. The other agent will always respond before the thread stops.`
-                )}</div>`
+            chat.isResponding
+              ? `<div class="status-banner">${escapeHtml(statusBannerText(chat))}</div>`
               : ""
           }
           ${
-            !ui.isResponding && ui.needsArbitration
+            !chat.isResponding && chat.needsArbitration
               ? `<div class="status-banner arbitration-banner">${escapeHtml(
-                  ui.arbitrationSummary ?? "The agents did not converge. Developer arbitration is needed."
+                  chat.arbitrationSummary ?? "The agents did not converge. Developer arbitration is needed."
                 )}</div>`
               : ""
           }
           <textarea
             id="promptInput"
             rows="5"
-            ${ui.isResponding ? "disabled" : ""}
-            placeholder="${escapeHtml(placeholderForMode(ui.mode))}"
-          ></textarea>
+            ${chat.isResponding ? "disabled" : ""}
+            placeholder="${escapeHtml(placeholderForMode(chat.mode, chat.agentPreference.singleAgentMode, chat.phase))}"
+          >${escapeHtml(currentDraft())}</textarea>
           <div class="composer-bar">
             <span class="helper">Shift+Enter sends. Enter inserts a newline.</span>
             <div class="composer-buttons">
-              <button id="cancelButton" class="ghost" ${cancelDisabled}>${ui.isCancelling ? "Cancelling..." : "Cancel"}</button>
+              <button id="cancelButton" class="ghost" ${cancelDisabled}>${chat.isCancelling ? "Cancelling..." : "Cancel"}</button>
               <button id="sendButton" ${sendDisabled}>Send</button>
             </div>
           </div>
@@ -128,13 +145,16 @@
     const attachSelectionButton = document.getElementById("attachSelectionButton");
     const attachFileButton = document.getElementById("attachFileButton");
     const clearContextButton = document.getElementById("clearContextButton");
+    const createTaskButton = document.getElementById("createTaskButton");
+    const closeTaskButton = document.getElementById("closeTaskButton");
+    const taskTitleInput = document.getElementById("taskTitleInput");
 
     if (sendButton) {
       sendButton.addEventListener("click", submit);
     }
     if (cancelButton) {
       cancelButton.addEventListener("click", () => {
-        if (!ui.isResponding || ui.isCancelling) {
+        if (!chat.isResponding || chat.isCancelling) {
           return;
         }
         vscode.postMessage({ type: "cancelTurn" });
@@ -173,7 +193,25 @@
         vscode.postMessage({ type: "clearContext" });
       });
     }
+    if (createTaskButton) {
+      createTaskButton.addEventListener("click", () => {
+        vscode.postMessage({ type: "createTask" });
+      });
+    }
+    if (closeTaskButton) {
+      closeTaskButton.addEventListener("click", () => {
+        vscode.postMessage({ type: "closeTask", taskId: ui.activeTaskId });
+      });
+    }
+    if (taskTitleInput) {
+      taskTitleInput.addEventListener("change", (event) => {
+        vscode.postMessage({ type: "renameTask", value: event.target.value });
+      });
+    }
     if (promptInput) {
+      promptInput.addEventListener("input", () => {
+        setCurrentDraft(promptInput.value);
+      });
       promptInput.addEventListener("keydown", (event) => {
         if (event.key === "Enter" && event.shiftKey) {
           event.preventDefault();
@@ -186,7 +224,8 @@
   }
 
   function submit() {
-    if (ui.isResponding) {
+    const chat = activeChat();
+    if (chat.isResponding) {
       return;
     }
 
@@ -197,15 +236,31 @@
     }
 
     vscode.postMessage({ type: "submitPrompt", value });
+    setCurrentDraft("");
     promptInput.value = "";
   }
 
+  function renderTaskTab(task) {
+    const activeClass = task.id === ui.activeTaskId ? "is-active" : "";
+    const busyClass = task.isResponding ? "is-busy" : "";
+    const arbitrationMark = task.needsArbitration ? `<span class="task-badge arbitration">!</span>` : "";
+    const busyMark = task.isResponding ? `<span class="task-badge">●</span>` : "";
+
+    return `
+      <button class="task-tab ${activeClass} ${busyClass}" data-task-id="${escapeHtml(task.id)}">
+        <span class="task-tab-title">${escapeHtml(task.title)}</span>
+        ${busyMark}
+        ${arbitrationMark}
+      </button>
+    `;
+  }
+
   function renderModeOption(value, label) {
-    return `<option value="${value}" ${ui.mode === value ? "selected" : ""}>${label}</option>`;
+    return `<option value="${value}" ${activeChat().mode === value ? "selected" : ""}>${label}</option>`;
   }
 
   function renderPrimaryAgentOption(value, label) {
-    return `<option value="${value}" ${ui.agentPreference.primaryAgent === value ? "selected" : ""}>${label}</option>`;
+    return `<option value="${value}" ${activeChat().agentPreference.primaryAgent === value ? "selected" : ""}>${label}</option>`;
   }
 
   function renderMessage(message) {
@@ -270,11 +325,27 @@
   }
 
   function renderContextSummary() {
-    if (!ui.attachedContext) {
+    const attachedContext = activeChat().attachedContext;
+    if (!attachedContext) {
       return "No attached context";
     }
 
-    return formatContextChip(ui.attachedContext);
+    return formatContextChip(attachedContext);
+  }
+
+  function renderPhaseLabel(phase) {
+    switch (phase) {
+      case "planning":
+        return "Planning";
+      case "implementing":
+        return "Coding";
+      case "reviewing":
+        return "Review";
+      case "arbitration":
+        return "Arbitration";
+      default:
+        return "Idle";
+    }
   }
 
   function formatContextChip(context) {
@@ -289,25 +360,47 @@
     return parts.join(" • ");
   }
 
-  function placeholderForMode(mode) {
+  function placeholderForMode(mode, singleAgentMode, phase) {
+    if (singleAgentMode) {
+      return `${capitalize(activeChat().agentPreference.primaryAgent)} will handle this task alone.`;
+    }
+
+    if (mode === "coding") {
+      if (phase === "planning") {
+        return `${capitalize(activeChat().agentPreference.primaryAgent)} will align on a plan first, then code, then the other agent will review.`;
+      }
+      return `${capitalize(activeChat().agentPreference.primaryAgent)} will code after plan alignment, and the other agent will review the implementation.`;
+    }
+
     switch (mode) {
       case "design":
-        return ui.agentPreference.singleAgentMode
-          ? `${capitalize(ui.agentPreference.primaryAgent)} works alone on this design task.`
-          : `${capitalize(ui.agentPreference.primaryAgent)} speaks first. The other agent will still respond, even if the response is just LGTM.`;
-      case "coding":
-        return ui.agentPreference.singleAgentMode
-          ? `${capitalize(ui.agentPreference.primaryAgent)} works alone on this implementation task.`
-          : `${capitalize(ui.agentPreference.primaryAgent)} will open the implementation discussion, then the other agent will critique or approve it.`;
+        return `${capitalize(activeChat().agentPreference.primaryAgent)} speaks first. The other agent will still respond, even if the response is just LGTM.`;
       case "review":
-        return ui.agentPreference.singleAgentMode
-          ? `${capitalize(ui.agentPreference.primaryAgent)} handles this review alone.`
-          : `${capitalize(ui.agentPreference.primaryAgent)} will start the review, and the other agent will always leave feedback.`;
+        return `${capitalize(activeChat().agentPreference.primaryAgent)} will start the review, and the other agent will always leave feedback.`;
       default:
-        return ui.agentPreference.singleAgentMode
-          ? `${capitalize(ui.agentPreference.primaryAgent)} will answer this task alone.`
-          : `${capitalize(ui.agentPreference.primaryAgent)} will answer first, and the other agent will always respond before the thread ends.`;
+        return `${capitalize(activeChat().agentPreference.primaryAgent)} will answer first, and the other agent will always respond before the thread ends.`;
     }
+  }
+
+  function statusBannerText(chat) {
+    if (chat.isCancelling) {
+      return "Cancelling the current discussion...";
+    }
+
+    if (chat.mode === "coding") {
+      switch (chat.phase) {
+        case "planning":
+          return "The agents are discussing the implementation plan before code changes begin.";
+        case "implementing":
+          return `${capitalize(chat.agentPreference.primaryAgent)} is implementing the agreed plan.`;
+        case "reviewing":
+          return "The implementation is being reviewed against the agreed plan and recent changes.";
+        default:
+          break;
+      }
+    }
+
+    return `${capitalize(chat.agentPreference.primaryAgent)} is leading. The other agent will always respond before the thread stops.`;
   }
 
   function formatBody(text) {
@@ -343,12 +436,16 @@
   }
 
   function escapeHtml(text) {
-    return text
+    return String(text)
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#039;");
+  }
+
+  function escapeAttribute(text) {
+    return escapeHtml(text).replace(/\n/g, " ");
   }
 
   function scrollMessagesToBottom() {
@@ -361,6 +458,12 @@
   app.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const taskTab = target.closest(".task-tab");
+    if (taskTab instanceof HTMLElement && taskTab.dataset.taskId) {
+      vscode.postMessage({ type: "switchTask", taskId: taskTab.dataset.taskId });
       return;
     }
 
@@ -417,15 +520,9 @@
       return;
     }
 
-    ui.messages = message.value.messages;
-    ui.mode = message.value.mode;
-    ui.attachedContext = message.value.attachedContext;
-    ui.workflow = message.value.workflow;
-    ui.agentPreference = message.value.agentPreference;
-    ui.isResponding = message.value.isResponding;
-    ui.isCancelling = message.value.isCancelling;
-    ui.needsArbitration = message.value.needsArbitration;
-    ui.arbitrationSummary = message.value.arbitrationSummary;
+    ui.tasks = message.value.tasks;
+    ui.activeTaskId = message.value.activeTaskId;
+    ui.activeTask = message.value.activeTask;
     scheduleRender();
   });
 

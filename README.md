@@ -10,6 +10,7 @@
 - 支持 `general / design / coding / review` 模式，并为不同模式定义双 agent 讨论顺序
 - 支持附带当前选区或当前文件作为讨论上下文
 - 支持流式输出
+- 支持多个 task 并行保留，各自维护独立上下文和讨论状态
 - 默认直接使用本机 CLI 登录态
 - 保留 provider 抽象，后续仍可切到 HTTP API 或流式协议
 
@@ -35,7 +36,7 @@ npm run build
 AgentWorks: Open Chat
 ```
 
-聊天会默认开在代码右侧的编辑区，不占用左侧目录树。也可以直接从当前编辑器进入，并自动把上下文带过去：
+聊天会默认开在 VS Code 右侧的 secondary sidebar，不占用左侧目录树。也可以直接从当前编辑器进入，并自动把上下文带过去：
 
 ```text
 AgentWorks: Discuss Selection
@@ -77,19 +78,22 @@ AgentWorks: Discuss Current File
 
 ## 当前工作流
 
-- 你可以在界面顶部选择 `Primary`，决定谁先发言
+- 你可以在顶部 task 条里创建、切换、关闭多个任务线程
+- 每个 task 都独立保存消息、主 agent、solo 开关、上下文、仲裁状态和计时信息
+- 你可以在当前 task 底部选择 `Primary`，决定谁先发言
 - `general`
   由你选择的主 agent 先回答，另一个 agent 跟进反馈，双方继续讨论直到达成一致或达到轮数上限。
 - `design`
   由你选择的主 agent 先给方案，另一个 agent 会质疑、补充或认可，然后双方继续讨论。
 - `coding`
-  由你选择的主 agent 先给实施路径，另一个 agent 继续批评风险、维护性或直接认可。
+  默认先进入方案讨论，双方先对实施路径、文件改动范围和验证方式达成一致，再由主 agent 实施，最后另一位 agent 基于实际实现做 review。
 - `review`
   由你选择的主 agent 先给 review，另一个 agent 一定会给反馈，即使只是 `LGTM`。
 
 默认最多讨论若干轮，避免无限循环；如果双方明确输出 `CONSENSUS: agreed`，讨论会提前停止。
 无论谁是主 agent，另一个 agent 都至少会给一轮反馈，即使只是 `LGTM`。
 如果达到轮数上限仍未收敛，界面会明确提示需要开发者仲裁。
+如果任务比较简单，可以打开 `Solo`，只让主 agent 工作。
 
 ## 界面位置
 
@@ -98,6 +102,7 @@ AgentWorks: Discuss Current File
 - 不再占用 markdown 预览、git diff 等编辑器 tab 区域
 - 可以像 Codex 一样通过侧边容器切换到聊天界面
 - 代码编辑器仍然可以和聊天同时展示
+- task 切换通过聊天面板顶部的窄任务条完成，不额外占用左侧资源管理器
 - 点击消息里的代码引用时，会在主代码区打开并定位
 
 ## 文件上下文

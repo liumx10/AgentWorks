@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
-import { ChatSnapshot } from "./types";
+import { AppSnapshot } from "./types";
 
-export function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri, snapshot: ChatSnapshot): string {
+export function getWebviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri, snapshot: AppSnapshot): string {
   const nonce = createNonce();
   const initialState = JSON.stringify(snapshot).replace(/</g, "\\u003c");
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "webview", "main.js"));

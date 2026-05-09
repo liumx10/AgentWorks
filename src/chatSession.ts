@@ -2,10 +2,12 @@ import { AgentProvider } from "./providers";
 import {
   AgentParticipantRole,
   AgentRole,
-  ProcessEvent,
   AttachedContext,
   ChatMessage,
   ChatSnapshot,
+  ProcessEvent,
+  TaskPhase,
+  TaskSummary,
   WorkMode,
   WorkflowDescriptor
 } from "./types";
@@ -29,6 +31,10 @@ export class ChatSession {
   private primaryAgent: AgentParticipantRole = "codex";
   private singleAgentMode = false;
   private currentAbortController: AbortController | undefined;
+  private phase: TaskPhase = "idle";
+  private updatedAt = new Date().toISOString();
+  private title = "New Task";
+  private titleWasCustomized = false;
 
   constructor(private readonly providers: AgentProvider[]) {
     for (const provider of providers) {
@@ -41,7 +47,7 @@ export class ChatSession {
       messages: [...this.messages],
       mode: this.mode,
       attachedContext: this.attachedContext,
-      workflow: describeWorkflow(this.mode),
+      workflow: describeWorkflow(this.mode, this.phase, this.singleAgentMode),
       agentPreference: {
         primaryAgent: this.primaryAgent,
         singleAgentMode: this.singleAgentMode
@@ -49,7 +55,24 @@ export class ChatSession {
       isResponding: this.isResponding,
       isCancelling: this.isCancelling,
       needsArbitration: this.needsArbitration,
-      arbitrationSummary: this.arbitrationSummary
+      arbitrationSummary: this.arbitrationSummary,
+      phase: this.phase
+    };
+  }
+
+  getSummary(taskId: string): TaskSummary {
+    return {
+      id: taskId,
+      title: this.title,
+      updatedAt: this.updatedAt,
+      messageCount: this.messages.length,
+      mode: this.mode,
+      phase: this.phase,
+      isResponding: this.isResponding,
+      isCancelling: this.isCancelling,
+      needsArbitration: this.needsArbitration,
+      primaryAgent: this.primaryAgent,
+      singleAgentMode: this.singleAgentMode
     };
   }
 
@@ -62,6 +85,7 @@ export class ChatSession {
     this.needsArbitration = false;
     this.arbitrationSummary = undefined;
     this.currentAbortController = new AbortController();
+    this.phase = initialPhaseForMode(this.mode, this.singleAgentMode);
     this.messages.push(
       createMessage({
         role: "developer",
@@ -72,6 +96,8 @@ export class ChatSession {
         attachedContext: this.attachedContext
       })
     );
+    this.deriveTitleFromLatestDeveloperMessage();
+    this.bumpUpdatedAt();
 
     return {
       mode: this.mode,
@@ -92,57 +118,19 @@ export class ChatSession {
       if (targets.length === 1 || this.singleAgentMode) {
         const primaryOnly =
           targets.length === 1 ? targets[0] : targets.includes(this.primaryAgent) ? this.primaryAgent : targets[0];
+        this.phase = phaseForSoloMode(turn.mode);
         await this.runSingleAgentTurn(primaryOnly, turn.mode, singleRoleInstruction(primaryOnly, turn.mode), onUpdate);
+        this.phase = "idle";
         return this.getSnapshot();
       }
 
-      const primary = this.primaryAgent;
-      const secondary = otherAgent(primary);
+      const primary = targets.includes(this.primaryAgent) ? this.primaryAgent : targets[0];
+      const secondary = targets.find((role) => role !== primary) ?? otherAgent(primary);
 
-      await this.runSingleAgentTurn(primary, turn.mode, openingInstruction(primary, turn.mode), onUpdate);
-
-      let consensus = false;
-      let secondaryResponded = false;
-      for (let round = 1; round <= MAX_DISCUSSION_ROUNDS; round += 1) {
-        await this.runSingleAgentTurn(
-          secondary,
-          turn.mode,
-          critiqueInstruction(secondary, primary, turn.mode, round),
-          onUpdate
-        );
-        secondaryResponded = true;
-
-        await this.runSingleAgentTurn(
-          primary,
-          turn.mode,
-          responseInstruction(primary, secondary, turn.mode, round),
-          onUpdate
-        );
-
-        const primaryMessage = this.getLastAgentMessage(primary);
-        const latestSecondary = this.getLastAgentMessage(secondary);
-        if (
-          primaryMessage &&
-          latestSecondary &&
-          detectsConsensusSignal(primaryMessage.content) &&
-          detectsConsensusSignal(latestSecondary.content)
-        ) {
-          consensus = true;
-          break;
-        }
-      }
-
-      if (!consensus) {
-        await this.runSingleAgentTurn(
-          secondary,
-          turn.mode,
-          secondaryResponded
-            ? summaryInstruction(secondary, primary, turn.mode)
-            : minimumFeedbackInstruction(secondary, primary, turn.mode),
-          onUpdate
-        );
-        this.needsArbitration = true;
-        this.arbitrationSummary = buildArbitrationSummary(primary, secondary, turn.mode, this.messages);
+      if (turn.mode === "coding") {
+        await this.runPlanThenCodeTurn(primary, secondary, turn.mode, onUpdate);
+      } else {
+        await this.runDiscussionTurn(primary, secondary, turn.mode, onUpdate);
       }
     } catch (error) {
       if (!isAbortError(error)) {
@@ -152,6 +140,10 @@ export class ChatSession {
       this.isResponding = false;
       this.isCancelling = false;
       this.currentAbortController = undefined;
+      if (!this.needsArbitration) {
+        this.phase = "idle";
+      }
+      this.bumpUpdatedAt();
     }
 
     return this.getSnapshot();
@@ -159,16 +151,34 @@ export class ChatSession {
 
   setMode(mode: WorkMode): ChatSnapshot {
     this.mode = mode;
+    if (!this.isResponding && !this.needsArbitration) {
+      this.phase = "idle";
+    }
+    this.bumpUpdatedAt();
     return this.getSnapshot();
   }
 
   setPrimaryAgent(role: AgentParticipantRole): ChatSnapshot {
     this.primaryAgent = role;
+    this.bumpUpdatedAt();
     return this.getSnapshot();
   }
 
   setSingleAgentMode(enabled: boolean): ChatSnapshot {
     this.singleAgentMode = enabled;
+    this.bumpUpdatedAt();
+    return this.getSnapshot();
+  }
+
+  setAttachedContext(context: AttachedContext): ChatSnapshot {
+    this.attachedContext = context;
+    this.bumpUpdatedAt();
+    return this.getSnapshot();
+  }
+
+  clearAttachedContext(): ChatSnapshot {
+    this.attachedContext = undefined;
+    this.bumpUpdatedAt();
     return this.getSnapshot();
   }
 
@@ -176,17 +186,8 @@ export class ChatSession {
     if (this.isResponding && this.currentAbortController && !this.currentAbortController.signal.aborted) {
       this.isCancelling = true;
       this.currentAbortController.abort();
+      this.bumpUpdatedAt();
     }
-    return this.getSnapshot();
-  }
-
-  setAttachedContext(context: AttachedContext): ChatSnapshot {
-    this.attachedContext = context;
-    return this.getSnapshot();
-  }
-
-  clearAttachedContext(): ChatSnapshot {
-    this.attachedContext = undefined;
     return this.getSnapshot();
   }
 
@@ -199,7 +200,150 @@ export class ChatSession {
     this.needsArbitration = false;
     this.arbitrationSummary = undefined;
     this.currentAbortController = undefined;
+    this.phase = "idle";
+    this.bumpUpdatedAt();
     return this.getSnapshot();
+  }
+
+  rename(title: string): ChatSnapshot {
+    const normalized = title.trim();
+    if (normalized) {
+      this.title = normalized;
+      this.titleWasCustomized = true;
+      this.bumpUpdatedAt();
+    }
+    return this.getSnapshot();
+  }
+
+  seedTitle(title: string): ChatSnapshot {
+    const normalized = title.trim();
+    if (normalized) {
+      this.title = normalized;
+      this.titleWasCustomized = false;
+      this.bumpUpdatedAt();
+    }
+    return this.getSnapshot();
+  }
+
+  private async runPlanThenCodeTurn(
+    primary: AgentParticipantRole,
+    secondary: AgentParticipantRole,
+    mode: WorkMode,
+    onUpdate?: (snapshot: ChatSnapshot) => void
+  ): Promise<void> {
+    this.phase = "planning";
+    await this.runDiscussionTurn(primary, secondary, "design", onUpdate, {
+      openingInstruction: planOpeningInstruction(primary),
+      critiqueInstruction: (round) => planCritiqueInstruction(secondary, primary, round),
+      responseInstruction: (round) => planResponseInstruction(primary, secondary, round),
+      summaryInstruction: () => planSummaryInstruction(secondary, primary),
+      minimumFeedbackInstruction: () => minimumFeedbackInstruction(secondary, primary, "design")
+    });
+
+    if (this.needsArbitration || this.currentAbortController?.signal.aborted) {
+      return;
+    }
+
+    this.phase = "implementing";
+    await this.runSingleAgentTurn(primary, mode, codingExecutionInstruction(primary), onUpdate);
+
+    this.phase = "reviewing";
+    await this.runSingleAgentTurn(secondary, "review", postImplementationReviewInstruction(secondary, primary), onUpdate);
+
+    const primaryFollowUp =
+      findLatestMessageSincePhase(this.messages, primary, this.phase) ?? this.getLastAgentMessage(primary);
+    const secondaryReview = this.getLastAgentMessage(secondary);
+    if (
+      primaryFollowUp &&
+      secondaryReview &&
+      !detectsConsensusSignal(primaryFollowUp.content) &&
+      !detectsConsensusSignal(secondaryReview.content)
+    ) {
+      await this.runSingleAgentTurn(
+        primary,
+        mode,
+        finalCodingResponseInstruction(primary, secondary),
+        onUpdate
+      );
+    }
+  }
+
+  private async runDiscussionTurn(
+    primary: AgentParticipantRole,
+    secondary: AgentParticipantRole,
+    mode: WorkMode,
+    onUpdate?: (snapshot: ChatSnapshot) => void,
+    instructionOverride?: {
+      openingInstruction?: string;
+      critiqueInstruction?: (round: number) => string;
+      responseInstruction?: (round: number) => string;
+      summaryInstruction?: () => string;
+      minimumFeedbackInstruction?: () => string;
+    }
+  ): Promise<void> {
+    this.phase = mode === "review" ? "reviewing" : this.phase === "planning" ? "planning" : "implementing";
+
+    await this.runSingleAgentTurn(
+      primary,
+      mode,
+      instructionOverride?.openingInstruction ?? openingInstruction(primary, mode),
+      onUpdate
+    );
+
+    let consensus = false;
+    let secondaryResponded = false;
+
+    for (let round = 1; round <= MAX_DISCUSSION_ROUNDS; round += 1) {
+      await this.runSingleAgentTurn(
+        secondary,
+        mode,
+        instructionOverride?.critiqueInstruction?.(round) ??
+          critiqueInstruction(secondary, primary, mode, round),
+        onUpdate
+      );
+      secondaryResponded = true;
+
+      const latestSecondary = this.getLastAgentMessage(secondary);
+      if (latestSecondary && detectsConsensusSignal(latestSecondary.content)) {
+        consensus = true;
+        break;
+      }
+
+      await this.runSingleAgentTurn(
+        primary,
+        mode,
+        instructionOverride?.responseInstruction?.(round) ??
+          responseInstruction(primary, secondary, mode, round),
+        onUpdate
+      );
+
+      const primaryMessage = this.getLastAgentMessage(primary);
+      const latestSecondaryAfterPrimary = this.getLastAgentMessage(secondary);
+      if (
+        primaryMessage &&
+        latestSecondaryAfterPrimary &&
+        detectsConsensusSignal(primaryMessage.content) &&
+        detectsConsensusSignal(latestSecondaryAfterPrimary.content)
+      ) {
+        consensus = true;
+        break;
+      }
+    }
+
+    if (!consensus) {
+      await this.runSingleAgentTurn(
+        secondary,
+        mode,
+        secondaryResponded
+          ? instructionOverride?.summaryInstruction?.() ?? summaryInstruction(secondary, primary, mode)
+          : instructionOverride?.minimumFeedbackInstruction?.() ??
+              minimumFeedbackInstruction(secondary, primary, mode),
+        onUpdate
+      );
+      this.needsArbitration = true;
+      this.phase = "arbitration";
+      this.arbitrationSummary = buildArbitrationSummary(primary, secondary, mode, this.messages);
+    }
   }
 
   private async runSingleAgentTurn(
@@ -214,6 +358,7 @@ export class ChatSession {
     }
 
     const draftId = this.appendAgentDraft(role, mode);
+    this.bumpUpdatedAt();
     onUpdate?.(this.getSnapshot());
 
     try {
@@ -227,20 +372,24 @@ export class ChatSession {
         {
           onText: (update) => {
             this.updateMessageContent(draftId, update.mode, update.text);
+            this.bumpUpdatedAt();
             onUpdate?.(this.getSnapshot());
           },
           onProcess: (event) => {
             this.appendProcessEvent(draftId, event);
+            this.bumpUpdatedAt();
             onUpdate?.(this.getSnapshot());
           }
         }
       );
 
       this.finalizeAgentDraft(draftId, reply.content);
+      this.bumpUpdatedAt();
       onUpdate?.(this.getSnapshot());
     } catch (error) {
       if (isAbortError(error)) {
         this.markDraftCancelled(draftId);
+        this.bumpUpdatedAt();
         onUpdate?.(this.getSnapshot());
       }
       throw error;
@@ -322,6 +471,28 @@ export class ChatSession {
     }
     return undefined;
   }
+
+  private deriveTitleFromLatestDeveloperMessage(): void {
+    if (this.titleWasCustomized) {
+      return;
+    }
+
+    const latestDeveloperMessage = [...this.messages].reverse().find((message) => message.role === "developer");
+    if (!latestDeveloperMessage) {
+      return;
+    }
+
+    const normalized = latestDeveloperMessage.content.replace(/\s+/g, " ").trim();
+    if (!normalized) {
+      return;
+    }
+
+    this.title = normalized.length > 42 ? `${normalized.slice(0, 39)}...` : normalized;
+  }
+
+  private bumpUpdatedAt(): void {
+    this.updatedAt = new Date().toISOString();
+  }
 }
 
 function createMessage(input: {
@@ -391,17 +562,49 @@ function detectMode(content: string): WorkMode | undefined {
   return undefined;
 }
 
-function describeWorkflow(mode: WorkMode): WorkflowDescriptor {
+function describeWorkflow(mode: WorkMode, phase: TaskPhase, singleAgentMode: boolean): WorkflowDescriptor {
+  if (singleAgentMode) {
+    return {
+      title: "Solo",
+      description: "The selected primary agent handles this task alone."
+    };
+  }
+
+  if (mode === "coding") {
+    switch (phase) {
+      case "planning":
+        return {
+          title: "Coding Plan",
+          description: "The agents are aligning on an implementation plan before touching code."
+        };
+      case "implementing":
+        return {
+          title: "Implementation",
+          description: "The primary agent is implementing the agreed path."
+        };
+      case "reviewing":
+        return {
+          title: "Implementation Review",
+          description: "The other agent is reviewing the implementation and its risks."
+        };
+      case "arbitration":
+        return {
+          title: "Needs Arbitration",
+          description: "The implementation thread did not converge and needs a developer decision."
+        };
+      default:
+        return {
+          title: "Coding Debate",
+          description: "Coding tasks first align on a plan, then implement, then review."
+        };
+    }
+  }
+
   switch (mode) {
     case "design":
       return {
         title: "Design Debate",
         description: "The selected primary agent opens, the other agent responds, and they continue until they converge or hit the round cap."
-      };
-    case "coding":
-      return {
-        title: "Implementation Debate",
-        description: "The selected primary agent proposes the implementation, the other critiques it, and they continue refining until they converge or stop."
       };
     case "review":
       return {
@@ -413,6 +616,36 @@ function describeWorkflow(mode: WorkMode): WorkflowDescriptor {
         title: "General Debate",
         description: "The selected primary agent answers first, the other reacts, and they continue the discussion until they agree or the round cap is reached."
       };
+  }
+}
+
+function initialPhaseForMode(mode: WorkMode, singleAgentMode: boolean): TaskPhase {
+  if (singleAgentMode) {
+    return phaseForSoloMode(mode);
+  }
+
+  switch (mode) {
+    case "coding":
+      return "planning";
+    case "review":
+      return "reviewing";
+    case "design":
+      return "planning";
+    default:
+      return "implementing";
+  }
+}
+
+function phaseForSoloMode(mode: WorkMode): TaskPhase {
+  switch (mode) {
+    case "review":
+      return "reviewing";
+    case "design":
+      return "planning";
+    case "coding":
+      return "implementing";
+    default:
+      return "implementing";
   }
 }
 
@@ -492,7 +725,7 @@ function singleRoleInstruction(role: AgentParticipantRole, mode: WorkMode): stri
       case "design":
         return "Focus on feasibility, interface shape, implementation boundaries, and what would make the design easy to ship.";
       case "coding":
-        return "Focus on code structure, files, algorithms, and the next concrete implementation steps.";
+        return "First define a concise plan, then implement it directly, edit files, and run the most relevant verification.";
       case "review":
         return "Focus on correctness bugs, regressions, edge cases, and missing tests.";
       default:
@@ -504,7 +737,7 @@ function singleRoleInstruction(role: AgentParticipantRole, mode: WorkMode): stri
     case "design":
       return "Focus on architecture alternatives, tradeoffs, and where the proposed design could be improved.";
     case "coding":
-      return "Focus on maintainability, readability, and risks in the implementation direction.";
+      return "First define a concise plan, then implement it directly with attention to maintainability and risk.";
     case "review":
       return "Focus on user impact, resilience, clarity, and any review findings that a purely code-level pass might miss.";
     default:
@@ -577,6 +810,63 @@ function summaryFocus(mode: WorkMode): string {
   }
 }
 
+function planOpeningInstruction(role: AgentParticipantRole): string {
+  return role === "codex"
+    ? "Do not edit code yet. Propose the implementation plan first: target files, change sequence, constraints, and verification strategy."
+    : "Do not edit code yet. Propose the best implementation plan, key tradeoffs, and what could go wrong.";
+}
+
+function planCritiqueInstruction(role: AgentParticipantRole, other: AgentParticipantRole, round: number): string {
+  return [
+    `Round ${round}.`,
+    `Review ${displayRole(other)}'s implementation plan only.`,
+    critiqueFocus(role, "coding"),
+    "Do not ask to code yet unless the plan is clear enough to execute.",
+    "If the plan is good enough, say CONSENSUS: agreed and summarize the approved plan briefly."
+  ].join(" ");
+}
+
+function planResponseInstruction(role: AgentParticipantRole, other: AgentParticipantRole, round: number): string {
+  return [
+    `Round ${round}.`,
+    `Reply to ${displayRole(other)}'s feedback on the implementation plan.`,
+    "Revise the plan as needed. Keep it concrete: files, steps, and verification.",
+    'If you now agree, say exactly "CONSENSUS: agreed" and summarize the final plan.'
+  ].join(" ");
+}
+
+function planSummaryInstruction(role: AgentParticipantRole, other: AgentParticipantRole): string {
+  return [
+    `You are ${displayRole(role)}.`,
+    `The planning discussion with ${displayRole(other)} reached the round cap without agreement.`,
+    "Summarize the best remaining plan, the blocking disagreement, and why developer arbitration is needed before coding starts.",
+    'Start with either "CONSENSUS: partial" or "CONSENSUS: unresolved".'
+  ].join(" ");
+}
+
+function codingExecutionInstruction(role: AgentParticipantRole): string {
+  return role === "codex"
+    ? 'Implement the agreed plan now. Edit files directly, run the most relevant validation you can, and summarize the concrete changes. If the plan changed during implementation, say why.'
+    : "Implement the agreed plan now. Edit files directly, verify the result, and call out any deviations from the plan.";
+}
+
+function postImplementationReviewInstruction(role: AgentParticipantRole, other: AgentParticipantRole): string {
+  return [
+    `You are ${displayRole(role)}.`,
+    `Review ${displayRole(other)}'s completed implementation, not the original request.`,
+    "Check correctness, regressions, test coverage, maintainability, and whether the implementation still matches the agreed plan.",
+    'If it looks good, say "CONSENSUS: agreed" and briefly confirm why. If not, state the blocking issues clearly.'
+  ].join(" ");
+}
+
+function finalCodingResponseInstruction(role: AgentParticipantRole, other: AgentParticipantRole): string {
+  return [
+    `You are ${displayRole(role)}.`,
+    `Reply to ${displayRole(other)}'s implementation review.`,
+    "If changes are needed, explain the fixes or remaining risks. If you agree with the review result, say CONSENSUS: agreed and summarize the final implementation state."
+  ].join(" ");
+}
+
 function detectsConsensusSignal(content: string): boolean {
   return /consensus:\s*agreed/i.test(content);
 }
@@ -612,6 +902,14 @@ function findLatestMessage(messages: ChatMessage[], role: AgentParticipantRole):
     }
   }
   return undefined;
+}
+
+function findLatestMessageSincePhase(
+  messages: ChatMessage[],
+  role: AgentParticipantRole,
+  _phase: TaskPhase
+): ChatMessage | undefined {
+  return findLatestMessage(messages, role);
 }
 
 function trimSummary(content: string): string {

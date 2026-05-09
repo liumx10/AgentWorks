@@ -3,6 +3,7 @@ export type AgentParticipantRole = Exclude<AgentRole, "developer">;
 
 export type WorkMode = "general" | "design" | "coding" | "review";
 export type ContextScope = "selection" | "file";
+export type TaskPhase = "idle" | "planning" | "implementing" | "reviewing" | "arbitration";
 
 export interface AttachedContext {
   id: string;
@@ -83,6 +84,34 @@ export interface ChatSnapshot {
   isCancelling: boolean;
   needsArbitration: boolean;
   arbitrationSummary?: string;
+  phase: TaskPhase;
+}
+
+export interface TaskSummary {
+  id: string;
+  title: string;
+  updatedAt: string;
+  messageCount: number;
+  mode: WorkMode;
+  phase: TaskPhase;
+  isResponding: boolean;
+  isCancelling: boolean;
+  needsArbitration: boolean;
+  primaryAgent: AgentParticipantRole;
+  singleAgentMode: boolean;
+}
+
+export interface TaskSnapshot {
+  id: string;
+  title: string;
+  updatedAt: string;
+  chat: ChatSnapshot;
+}
+
+export interface AppSnapshot {
+  tasks: TaskSummary[];
+  activeTaskId: string;
+  activeTask: TaskSnapshot;
 }
 
 export interface CodeReferenceTarget {

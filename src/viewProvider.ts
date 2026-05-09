@@ -1,9 +1,9 @@
 import * as vscode from "vscode";
 import * as path from "node:path";
-import { ChatSession } from "./chatSession";
 import { captureEditorContext } from "./editorContext";
+import { TaskManager } from "./taskManager";
 import { getWebviewHtml } from "./webviewHtml";
-import { AgentParticipantRole, ChatSnapshot, CodeReferenceTarget, ContextScope, WorkMode } from "./types";
+import { AgentParticipantRole, AppSnapshot, CodeReferenceTarget, ContextScope, WorkMode } from "./types";
 
 type IncomingMessage =
   | { type: "ready" }
@@ -15,7 +15,11 @@ type IncomingMessage =
   | { type: "clearChat" }
   | { type: "captureContext"; scope: ContextScope }
   | { type: "clearContext" }
-  | { type: "openReference"; value: CodeReferenceTarget };
+  | { type: "openReference"; value: CodeReferenceTarget }
+  | { type: "createTask" }
+  | { type: "switchTask"; taskId: string }
+  | { type: "closeTask"; taskId: string }
+  | { type: "renameTask"; value: string };
 
 export class AgentTalkViewProvider implements vscode.WebviewViewProvider {
   public static readonly viewId = "agentWorks.chatView";
@@ -25,7 +29,7 @@ export class AgentTalkViewProvider implements vscode.WebviewViewProvider {
 
   constructor(
     private readonly context: vscode.ExtensionContext,
-    private readonly session: ChatSession
+    private readonly taskManager: TaskManager
   ) {}
 
   static setPreferredCodeColumn(column: vscode.ViewColumn | undefined): void {
@@ -41,39 +45,51 @@ export class AgentTalkViewProvider implements vscode.WebviewViewProvider {
       localResourceRoots: [vscode.Uri.joinPath(this.context.extensionUri, "webview")]
     };
 
-    this.render(this.session.getSnapshot());
+    this.render(this.taskManager.getSnapshot());
 
     webviewView.webview.onDidReceiveMessage(async (message: IncomingMessage) => {
       switch (message.type) {
         case "ready":
-          await this.pushState(this.session.getSnapshot());
+          await this.pushState(this.taskManager.getSnapshot());
           break;
         case "submitPrompt":
           await this.handlePrompt(message.value);
           break;
         case "setMode":
-          await this.pushState(this.session.setMode(message.value));
+          await this.withActiveSession((session) => session.setMode(message.value));
           break;
         case "setPrimaryAgent":
-          await this.pushState(this.session.setPrimaryAgent(message.value));
+          await this.withActiveSession((session) => session.setPrimaryAgent(message.value));
           break;
         case "setSingleAgentMode":
-          await this.pushState(this.session.setSingleAgentMode(message.value));
+          await this.withActiveSession((session) => session.setSingleAgentMode(message.value));
           break;
         case "cancelTurn":
-          await this.pushState(this.session.cancelCurrentTurn());
+          await this.withActiveSession((session) => session.cancelCurrentTurn());
           break;
         case "clearChat":
-          await this.pushState(this.session.clear());
+          await this.withActiveSession((session) => session.clear());
           break;
         case "captureContext":
           await this.captureContext(message.scope);
           break;
         case "clearContext":
-          await this.pushState(this.session.clearAttachedContext());
+          await this.withActiveSession((session) => session.clearAttachedContext());
           break;
         case "openReference":
           await this.openReference(message.value);
+          break;
+        case "createTask":
+          await this.pushState(this.taskManager.createTask());
+          break;
+        case "switchTask":
+          await this.pushState(this.taskManager.switchTask(message.taskId));
+          break;
+        case "closeTask":
+          await this.pushState(this.taskManager.closeTask(message.taskId));
+          break;
+        case "renameTask":
+          await this.withActiveSession((session) => session.rename(message.value));
           break;
       }
     });
@@ -83,7 +99,7 @@ export class AgentTalkViewProvider implements vscode.WebviewViewProvider {
     await vscode.commands.executeCommand("workbench.view.extension.agentWorksSecondary");
     await vscode.commands.executeCommand(`${AgentTalkViewProvider.viewId}.focus`);
     if (this.view) {
-      this.render(this.session.getSnapshot());
+      this.render(this.taskManager.getSnapshot());
     }
   }
 
@@ -92,7 +108,7 @@ export class AgentTalkViewProvider implements vscode.WebviewViewProvider {
     await this.captureContext(scope);
   }
 
-  private render(snapshot: ChatSnapshot): void {
+  private render(snapshot: AppSnapshot): void {
     if (!this.view) {
       return;
     }
@@ -100,7 +116,7 @@ export class AgentTalkViewProvider implements vscode.WebviewViewProvider {
     this.view.webview.html = getWebviewHtml(this.view.webview, this.context.extensionUri, snapshot);
   }
 
-  private async pushState(snapshot: ChatSnapshot): Promise<void> {
+  private async pushState(snapshot: AppSnapshot): Promise<void> {
     if (!this.view) {
       return;
     }
@@ -116,12 +132,13 @@ export class AgentTalkViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    const turn = this.session.beginDeveloperTurn(value);
-    await this.pushState(this.session.getSnapshot());
-    const snapshot = await this.session.resolveDeveloperTurn(turn, async (nextSnapshot) => {
-      await this.pushState(nextSnapshot);
+    const active = this.taskManager.getActiveRecord();
+    const turn = active.session.beginDeveloperTurn(value);
+    await this.pushState(this.taskManager.getSnapshot());
+    const _snapshot = await active.session.resolveDeveloperTurn(turn, async () => {
+      await this.pushState(this.taskManager.getSnapshot());
     });
-    await this.pushState(snapshot);
+    await this.pushState(this.taskManager.getSnapshot());
   }
 
   private async captureContext(scope: ContextScope): Promise<void> {
@@ -131,7 +148,13 @@ export class AgentTalkViewProvider implements vscode.WebviewViewProvider {
       return;
     }
 
-    await this.pushState(this.session.setAttachedContext(context));
+    await this.withActiveSession((session) => session.setAttachedContext(context));
+  }
+
+  private async withActiveSession(action: (session: ReturnType<TaskManager["getActiveRecord"]>["session"]) => unknown): Promise<void> {
+    const active = this.taskManager.getActiveRecord();
+    action(active.session);
+    await this.pushState(this.taskManager.getSnapshot());
   }
 
   private async openReference(target: CodeReferenceTarget): Promise<void> {

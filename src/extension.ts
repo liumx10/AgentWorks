@@ -1,14 +1,14 @@
 import * as vscode from "vscode";
-import { ChatSession } from "./chatSession";
 import { createProviders } from "./providers";
+import { TaskManager } from "./taskManager";
 import { AgentTalkViewProvider } from "./viewProvider";
 
 export function activate(context: vscode.ExtensionContext): void {
   const config = vscode.workspace.getConfiguration("agentWorks");
   const workspaceRoot =
     vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? vscode.workspace.rootPath ?? process.cwd();
-  const session = new ChatSession(createProviders(config, workspaceRoot));
-  const viewProvider = new AgentTalkViewProvider(context, session);
+  const taskManager = new TaskManager(createProviders(config, workspaceRoot));
+  const viewProvider = new AgentTalkViewProvider(context, taskManager);
   AgentTalkViewProvider.setPreferredCodeColumn(vscode.window.activeTextEditor?.viewColumn);
 
   const activeEditorListener = vscode.window.onDidChangeActiveTextEditor((editor) => {
