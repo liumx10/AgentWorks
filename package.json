@@ -1,0 +1,166 @@
+{
+  "name": "agentworks",
+  "displayName": "AgentWorks",
+  "version": "0.0.1",
+  "description": "A VS Code extension for multi-agent engineering work between developer, Codex, and Claude in one chat thread.",
+  "publisher": "local",
+  "license": "SEE LICENSE IN LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/liumx10/AgentWorks.git"
+  },
+  "homepage": "https://github.com/liumx10/AgentWorks",
+  "bugs": {
+    "url": "https://github.com/liumx10/AgentWorks/issues"
+  },
+  "engines": {
+    "vscode": "^1.92.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:agentWorks.openChat",
+    "onCommand:agentWorks.openChatWithSelection",
+    "onCommand:agentWorks.openChatWithFile"
+  ],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "agentWorks.openChat",
+        "title": "AgentWorks: Open Chat"
+      },
+      {
+        "command": "agentWorks.openChatWithSelection",
+        "title": "AgentWorks: Discuss Selection"
+      },
+      {
+        "command": "agentWorks.openChatWithFile",
+        "title": "AgentWorks: Discuss Current File"
+      }
+    ],
+    "viewsContainers": {
+      "secondarySideBar": [
+        {
+          "id": "agentWorksSecondary",
+          "title": "AgentWorks",
+          "icon": "media/agent-talk.svg"
+        }
+      ]
+    },
+    "views": {
+      "agentWorksSecondary": [
+        {
+          "id": "agentWorks.chatView",
+          "name": "Discussion",
+          "type": "webview"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "AgentWorks",
+      "properties": {
+        "agentWorks.codexApiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Deprecated in the local CLI bridge approach. The extension uses your existing Codex CLI login."
+        },
+        "agentWorks.claudeApiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Deprecated in the local CLI bridge approach. The extension uses your existing Claude CLI login."
+        },
+        "agentWorks.codexModel": {
+          "type": "string",
+          "default": "gpt-5.4",
+          "description": "Model name used for the Codex-side agent."
+        },
+        "agentWorks.codexReasoningEffort": {
+          "type": "string",
+          "default": "medium",
+          "enum": [
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "description": "Reasoning effort used for the Codex-side agent. Lower settings usually improve first-token latency and throughput."
+        },
+        "agentWorks.codexSandbox": {
+          "type": "string",
+          "default": "workspace-write",
+          "enum": [
+            "read-only",
+            "workspace-write",
+            "danger-full-access"
+          ],
+          "description": "Sandbox mode used for the Codex-side agent. workspace-write allows editing files in the workspace and running local tests."
+        },
+        "agentWorks.codexCliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to the Codex CLI. Useful when VS Code cannot find it from PATH."
+        },
+        "agentWorks.claudeModel": {
+          "type": "string",
+          "default": "opus",
+          "description": "Model name used for the Claude-side agent."
+        },
+        "agentWorks.claudePermissionMode": {
+          "type": "string",
+          "default": "acceptEdits",
+          "enum": [
+            "acceptEdits",
+            "auto",
+            "bypassPermissions",
+            "default",
+            "dontAsk",
+            "plan"
+          ],
+          "description": "Permission mode used for the Claude-side agent. acceptEdits allows code changes without making Claude completely unrestricted."
+        },
+        "agentWorks.claudeTools": {
+          "type": "string",
+          "default": "default",
+          "description": "Tool set exposed to Claude. Use 'default' to allow its standard coding tools."
+        },
+        "agentWorks.claudeCliPath": {
+          "type": "string",
+          "default": "",
+          "description": "Optional absolute path to the Claude CLI. Useful when VS Code cannot find it from PATH."
+        },
+        "agentWorks.systemPrompt": {
+          "type": "string",
+          "default": "You are participating in a collaborative engineering chat with a developer and another AI agent. Be concise, concrete, and technically rigorous.",
+          "description": "Base system prompt shared with both agents."
+        },
+        "agentWorks.enableMockResponses": {
+          "type": "boolean",
+          "default": false,
+          "description": "Use local mock responses instead of the installed Codex and Claude CLIs."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package",
+    "lint": "tsc --noEmit -p ./"
+  },
+  "keywords": [
+    "vscode",
+    "chat",
+    "agent",
+    "claude",
+    "codex"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "@types/vscode": "^1.92.0",
+    "typescript": "^5.8.3",
+    "vsce": "^2.15.0"
+  }
+}
