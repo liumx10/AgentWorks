@@ -2,15 +2,20 @@
   const vscode = acquireVsCodeApi();
   const app = document.getElementById("app");
   const state = window.__AGENT_TALK_STATE__;
+  const persistedState = vscode.getState() ?? {};
 
   const ui = {
     tasks: state.tasks,
     activeTaskId: state.activeTaskId,
-    activeTask: state.activeTask
+    activeTask: state.activeTask,
+    taskListOpen: Boolean(persistedState.taskListOpen)
   };
   const collapsedMessages = new Set();
-  const collapsedProcesses = new Set();
+  const expandedProcesses = new Set();
+  const seenProcessEventIds = new Set();
   const draftsByTaskId = new Map();
+  const visibleProcessEventLimit = 8;
+  let openSelectId = null;
   let renderQueued = false;
 
   function scheduleRender() {
@@ -37,36 +42,58 @@
     draftsByTaskId.set(ui.activeTaskId, value);
   }
 
+  function setTaskListOpen(value) {
+    ui.taskListOpen = value;
+    vscode.setState({ taskListOpen: value });
+  }
+
   function render() {
     const chat = activeChat();
     const controlsDisabled = chat.isResponding ? "disabled" : "";
     const sendDisabled = chat.isResponding ? "disabled" : "";
     const cancelDisabled = !chat.isResponding || chat.isCancelling ? "disabled" : "";
+    const taskListLabel = ui.taskListOpen ? "Back to current task" : "Show task list";
 
     app.innerHTML = `
       <div class="app-shell">
-        <section class="task-strip">
-          <div class="task-scroller">
-            ${ui.tasks.map(renderTaskTab).join("")}
-          </div>
-          <button id="createTaskButton" class="subtle task-create">New</button>
-        </section>
-
-        <main class="chat-stage">
-          <section class="task-header">
+        <section class="task-panel">
+          <div class="task-line">
+            <button
+              id="toggleTaskListButton"
+              class="subtle icon-button"
+              aria-label="${escapeAttribute(taskListLabel)}"
+              title="${escapeAttribute(taskListLabel)}"
+            >←</button>
             <input
               id="taskTitleInput"
               class="task-title-input"
               value="${escapeAttribute(ui.activeTask.title)}"
               ${chat.isResponding ? "disabled" : ""}
             />
-            <div class="chip-stack">
-              <span class="status-chip">${escapeHtml(chat.workflow.title)}</span>
-              <span class="status-chip">${escapeHtml(renderPhaseLabel(chat.phase))}</span>
-              <span class="status-chip ${chat.attachedContext ? "" : "muted"}">${escapeHtml(renderContextSummary())}</span>
-            </div>
-          </section>
+          </div>
+          ${
+            ui.taskListOpen
+              ? `
+                <div class="task-list-panel">
+                  <div class="task-list-toolbar">
+                    <span class="task-list-label">Tasks</span>
+                    <button id="createTaskButton" class="subtle compact-button">New</button>
+                  </div>
+                  <div class="task-list">
+                    ${ui.tasks.map(renderTaskListItem).join("")}
+                  </div>
+                </div>
+              `
+              : ""
+          }
+          <div class="task-meta-row">
+            <span class="status-chip">${escapeHtml(chat.workflow.title)}</span>
+            <span class="status-chip">${escapeHtml(renderPhaseLabel(chat.phase))}</span>
+            <span class="status-chip ${chat.attachedContext ? "" : "muted"}">${escapeHtml(renderContextSummary())}</span>
+          </div>
+        </section>
 
+        <main class="chat-stage">
           <section id="messages" class="chat-thread">
             ${chat.messages.map(renderMessage).join("")}
           </section>
@@ -75,35 +102,33 @@
         <footer class="composer">
           <div class="control-dock control-dock-top">
             <div class="dock-fields">
-              <label class="field compact">
-                <span>Mode</span>
-                <select id="modeSelect" ${controlsDisabled}>
-                  ${renderModeOption("general", "General")}
-                  ${renderModeOption("design", "Design")}
-                  ${renderModeOption("coding", "Coding")}
-                  ${renderModeOption("review", "Review")}
-                </select>
-              </label>
-              <label class="field compact">
-                <span>Primary</span>
-                <select id="primaryAgentSelect" ${controlsDisabled}>
-                  ${renderPrimaryAgentOption("codex", "Codex")}
-                  ${renderPrimaryAgentOption("claude", "Claude")}
-                </select>
-              </label>
-              <label class="field compact checkbox-field">
-                <span>Solo</span>
-                <input id="singleAgentModeToggle" type="checkbox" ${
-                  chat.agentPreference.singleAgentMode ? "checked" : ""
-                } ${controlsDisabled} />
-              </label>
+              ${renderControlSelect("mode", "Mode", chat.mode, [
+                { value: "general", label: "General" },
+                { value: "design", label: "Design" },
+                { value: "coding", label: "Coding" },
+                { value: "review", label: "Review" }
+              ], chat.isResponding)}
+              ${renderControlSelect("primaryAgent", "Primary", chat.agentPreference.primaryAgent, [
+                { value: "codex", label: "Codex" },
+                { value: "claude", label: "Claude" }
+              ], chat.isResponding)}
+              ${renderControlSelect(
+                "workMode",
+                "Work",
+                chat.agentPreference.singleAgentMode ? "solo" : "interactive",
+                [
+                  { value: "solo", label: "Solo" },
+                  { value: "interactive", label: "Interactive" }
+                ],
+                chat.isResponding
+              )}
             </div>
             <div class="dock-actions">
               <button id="attachSelectionButton" class="subtle" ${controlsDisabled}>Selection</button>
               <button id="attachFileButton" class="subtle" ${controlsDisabled}>File</button>
               <button id="clearContextButton" class="subtle" ${controlsDisabled}>Detach</button>
               <button id="clearButton" class="subtle" ${controlsDisabled}>Clear</button>
-              <button id="closeTaskButton" class="subtle" ${chat.isResponding ? "disabled" : ""}>Close Task</button>
+              <button id="closeTaskButton" class="subtle" ${chat.isResponding ? "disabled" : ""}>Close</button>
             </div>
           </div>
           ${
@@ -139,12 +164,10 @@
     const sendButton = document.getElementById("sendButton");
     const cancelButton = document.getElementById("cancelButton");
     const clearButton = document.getElementById("clearButton");
-    const modeSelect = document.getElementById("modeSelect");
-    const primaryAgentSelect = document.getElementById("primaryAgentSelect");
-    const singleAgentModeToggle = document.getElementById("singleAgentModeToggle");
     const attachSelectionButton = document.getElementById("attachSelectionButton");
     const attachFileButton = document.getElementById("attachFileButton");
     const clearContextButton = document.getElementById("clearContextButton");
+    const toggleTaskListButton = document.getElementById("toggleTaskListButton");
     const createTaskButton = document.getElementById("createTaskButton");
     const closeTaskButton = document.getElementById("closeTaskButton");
     const taskTitleInput = document.getElementById("taskTitleInput");
@@ -163,21 +186,6 @@
     if (clearButton) {
       clearButton.addEventListener("click", () => vscode.postMessage({ type: "clearChat" }));
     }
-    if (modeSelect) {
-      modeSelect.addEventListener("change", (event) => {
-        vscode.postMessage({ type: "setMode", value: event.target.value });
-      });
-    }
-    if (primaryAgentSelect) {
-      primaryAgentSelect.addEventListener("change", (event) => {
-        vscode.postMessage({ type: "setPrimaryAgent", value: event.target.value });
-      });
-    }
-    if (singleAgentModeToggle) {
-      singleAgentModeToggle.addEventListener("change", (event) => {
-        vscode.postMessage({ type: "setSingleAgentMode", value: event.target.checked });
-      });
-    }
     if (attachSelectionButton) {
       attachSelectionButton.addEventListener("click", () => {
         vscode.postMessage({ type: "captureContext", scope: "selection" });
@@ -193,8 +201,15 @@
         vscode.postMessage({ type: "clearContext" });
       });
     }
+    if (toggleTaskListButton) {
+      toggleTaskListButton.addEventListener("click", () => {
+        setTaskListOpen(!ui.taskListOpen);
+        scheduleRender();
+      });
+    }
     if (createTaskButton) {
       createTaskButton.addEventListener("click", () => {
+        setTaskListOpen(false);
         vscode.postMessage({ type: "createTask" });
       });
     }
@@ -220,7 +235,9 @@
       });
     }
 
+    scrollProcessWindowsToBottom();
     scrollMessagesToBottom();
+    rememberRenderedProcessEvents(chat);
   }
 
   function submit() {
@@ -240,27 +257,66 @@
     promptInput.value = "";
   }
 
-  function renderTaskTab(task) {
+  function renderTaskListItem(task) {
     const activeClass = task.id === ui.activeTaskId ? "is-active" : "";
-    const busyClass = task.isResponding ? "is-busy" : "";
-    const arbitrationMark = task.needsArbitration ? `<span class="task-badge arbitration">!</span>` : "";
-    const busyMark = task.isResponding ? `<span class="task-badge">●</span>` : "";
+    const statusText = task.needsArbitration
+      ? "Needs arbitration"
+      : task.isResponding
+        ? "Running"
+        : "";
 
     return `
-      <button class="task-tab ${activeClass} ${busyClass}" data-task-id="${escapeHtml(task.id)}">
-        <span class="task-tab-title">${escapeHtml(task.title)}</span>
-        ${busyMark}
-        ${arbitrationMark}
+      <button class="task-item ${activeClass}" data-task-id="${escapeHtml(task.id)}">
+        <span class="task-item-title">${escapeHtml(task.title)}</span>
+        ${statusText ? `<span class="task-item-meta">${escapeHtml(statusText)}</span>` : ""}
       </button>
     `;
   }
 
-  function renderModeOption(value, label) {
-    return `<option value="${value}" ${activeChat().mode === value ? "selected" : ""}>${label}</option>`;
-  }
+  function renderControlSelect(id, title, currentValue, options, disabled) {
+    const currentOption = options.find((option) => option.value === currentValue) ?? options[0];
+    const isOpen = openSelectId === id && !disabled;
+    const disabledAttribute = disabled ? "disabled" : "";
 
-  function renderPrimaryAgentOption(value, label) {
-    return `<option value="${value}" ${activeChat().agentPreference.primaryAgent === value ? "selected" : ""}>${label}</option>`;
+    return `
+      <div class="field control-select ${isOpen ? "is-open" : ""}" data-select-id="${escapeAttribute(id)}">
+        <button
+          type="button"
+          class="select-trigger"
+          aria-label="${escapeAttribute(title)}"
+          aria-haspopup="listbox"
+          aria-expanded="${isOpen ? "true" : "false"}"
+          data-select-trigger="${escapeAttribute(id)}"
+          ${disabledAttribute}
+        >
+          <span>${escapeHtml(currentOption.label)}</span>
+          <span class="select-caret">▾</span>
+        </button>
+        ${
+          isOpen
+            ? `
+              <div class="select-menu" role="listbox" aria-label="${escapeAttribute(title)} options">
+                <div class="select-menu-title">${escapeHtml(title)}</div>
+                ${options
+                  .map(
+                    (option) => `
+                      <button
+                        type="button"
+                        class="select-option ${option.value === currentValue ? "is-selected" : ""}"
+                        role="option"
+                        aria-selected="${option.value === currentValue ? "true" : "false"}"
+                        data-select-option="${escapeAttribute(id)}"
+                        data-select-value="${escapeAttribute(option.value)}"
+                      >${escapeHtml(option.label)}</button>
+                    `
+                  )
+                  .join("")}
+              </div>
+            `
+            : ""
+        }
+      </div>
+    `;
   }
 
   function renderMessage(message) {
@@ -270,7 +326,7 @@
         ? `<span class="stream-placeholder">Thinking...</span><span class="caret"></span>`
         : "";
     const isCollapsed = collapsedMessages.has(message.id);
-    const processCollapsed = collapsedProcesses.has(message.id);
+    const processExpanded = message.isStreaming || expandedProcesses.has(message.id);
     const hasBody = Boolean(message.content);
     const processEvents = message.processEvents ?? [];
 
@@ -293,32 +349,50 @@
                 )}">${isCollapsed ? "Expand" : "Collapse"}</button></div>`
               : ""
           }
-          ${
-            processEvents.length
-              ? `
-                <section class="process-log ${processCollapsed ? "is-collapsed" : ""}">
-                  <div class="process-header">
-                    <span>Process</span>
-                    <button class="subtle process-toggle" data-message-id="${escapeHtml(message.id)}">${
-                      processCollapsed ? "Show" : "Hide"
-                    }</button>
-                  </div>
-                  <div class="process-items">
-                    ${processEvents.map(renderProcessEvent).join("")}
-                  </div>
-                </section>
-              `
-              : ""
-          }
+          ${processEvents.length ? renderProcessLog(message, processEvents, processExpanded) : ""}
         </div>
       </article>
     `;
   }
 
-  function renderProcessEvent(event) {
+  function renderProcessLog(message, processEvents, processExpanded) {
+    const hiddenCount = Math.max(0, processEvents.length - visibleProcessEventLimit);
+    const visibleEvents = hiddenCount ? processEvents.slice(hiddenCount) : processEvents;
+
     return `
-      <div class="process-item status-${escapeHtml(event.status)}">
-        <div class="process-summary">${escapeHtml(event.summary)}</div>
+      <section class="process-log ${processExpanded ? "" : "is-collapsed"} ${message.isStreaming ? "is-live" : ""}">
+        <div class="process-header">
+          <span class="process-title">
+            <span>Process</span>
+            <span class="process-count">${processEvents.length}</span>
+          </span>
+          <button class="subtle process-toggle" data-message-id="${escapeHtml(message.id)}">${
+            processExpanded ? "Hide" : "Show"
+          }</button>
+        </div>
+        <div class="process-window">
+          <div class="process-items" data-process-window>
+            ${
+              hiddenCount
+                ? `<div class="process-folded">${hiddenCount} earlier ${hiddenCount === 1 ? "step" : "steps"} folded</div>`
+                : ""
+            }
+            ${visibleEvents.map(renderProcessEvent).join("")}
+          </div>
+        </div>
+      </section>
+    `;
+  }
+
+  function renderProcessEvent(event) {
+    const newClass = seenProcessEventIds.has(event.id) ? "" : "is-new";
+
+    return `
+      <div class="process-item status-${escapeHtml(event.status)} ${newClass}">
+        <div class="process-summary">
+          <span class="process-dot"></span>
+          <span>${escapeHtml(event.summary)}</span>
+        </div>
         ${event.detail ? `<div class="process-detail">${escapeHtml(event.detail)}</div>` : ""}
       </div>
     `;
@@ -404,16 +478,109 @@
   }
 
   function formatBody(text) {
-    return linkifyCodeReferences(escapeHtml(text)).replace(/\n/g, "<br>");
+    return linkifyCodeReferences(text).replace(/\n/g, "<br>");
   }
 
   function linkifyCodeReferences(text) {
-    const pattern = /(^|[\s(>])((?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+\.[A-Za-z0-9_-]+):(\d+)\b/g;
-    return text.replace(pattern, (match, prefix, refPath, line) => {
-      const encodedPath = encodeURIComponent(refPath);
-      const encodedLine = encodeURIComponent(line);
-      return `${prefix}<button class="code-ref" data-path="${encodedPath}" data-line="${encodedLine}">${refPath}:${line}</button>`;
+    const matches = collectCodeReferenceMatches(text);
+    if (matches.length === 0) {
+      return escapeHtml(text);
+    }
+
+    let cursor = 0;
+    let result = "";
+    for (const match of matches) {
+      if (match.start < cursor) {
+        continue;
+      }
+
+      result += escapeHtml(text.slice(cursor, match.start));
+      result += renderCodeReference(match.label, match.path, match.line);
+      cursor = match.end;
+    }
+
+    result += escapeHtml(text.slice(cursor));
+    return result;
+  }
+
+  function collectCodeReferenceMatches(text) {
+    const matches = [];
+    const seenRanges = [];
+
+    const markdownAnglePattern = /\[([^\]\n]+)\]\(<([^>\n]+):(\d+)>\)/g;
+    const markdownPlainPattern = /\[([^\]\n]+)\]\(((?:\.{1,2}\/|\/)?[^)\s]+):(\d+)\)/g;
+    const barePattern = /(^|[\s(>])((?:\.{1,2}\/|\/)?(?:[A-Za-z0-9_@.-]+\/)*[A-Za-z0-9_@.-]+\.[A-Za-z0-9_-]+):(\d+)\b/g;
+
+    collectMatches(markdownAnglePattern, text, (match) => {
+      const [, label, refPath, line] = match;
+      return {
+        start: match.index,
+        end: match.index + match[0].length,
+        label,
+        path: refPath,
+        line: Number(line)
+      };
     });
+
+    collectMatches(markdownPlainPattern, text, (match) => {
+      const [, label, refPath, line] = match;
+      return {
+        start: match.index,
+        end: match.index + match[0].length,
+        label,
+        path: refPath,
+        line: Number(line)
+      };
+    });
+
+    collectMatches(barePattern, text, (match) => {
+      const [, prefix, refPath, line] = match;
+      const start = match.index + prefix.length;
+      return {
+        start,
+        end: start + `${refPath}:${line}`.length,
+        label: `${refPath}:${line}`,
+        path: refPath,
+        line: Number(line)
+      };
+    });
+
+    matches.sort((left, right) => left.start - right.start);
+    return matches;
+
+    function collectMatches(pattern, value, toMatch) {
+      let match;
+      while ((match = pattern.exec(value)) !== null) {
+        const candidate = toMatch(match);
+        if (!isValidCodeReference(candidate.path, candidate.line)) {
+          continue;
+        }
+        if (seenRanges.some((range) => candidate.start < range.end && candidate.end > range.start)) {
+          continue;
+        }
+        seenRanges.push({ start: candidate.start, end: candidate.end });
+        matches.push(candidate);
+      }
+    }
+  }
+
+  function isValidCodeReference(refPath, line) {
+    if (!Number.isInteger(line) || line <= 0) {
+      return false;
+    }
+
+    const normalized = refPath.trim();
+    if (!normalized || /^[a-z]+:\/\//i.test(normalized)) {
+      return false;
+    }
+
+    return /(?:^|\/)[^/\n]+\.[A-Za-z0-9_-]+$/.test(normalized);
+  }
+
+  function renderCodeReference(label, refPath, line) {
+    const encodedPath = encodeURIComponent(refPath);
+    const encodedLine = encodeURIComponent(String(line));
+    return `<button class="code-ref" data-path="${encodedPath}" data-line="${encodedLine}">${escapeHtml(label)}</button>`;
   }
 
   function formatTime(timestamp) {
@@ -455,19 +622,71 @@
     }
   }
 
+  function scrollProcessWindowsToBottom() {
+    for (const processWindow of document.querySelectorAll("[data-process-window]")) {
+      processWindow.scrollTop = processWindow.scrollHeight;
+    }
+  }
+
+  function rememberRenderedProcessEvents(chat) {
+    for (const message of chat.messages) {
+      for (const event of message.processEvents ?? []) {
+        seenProcessEventIds.add(event.id);
+      }
+    }
+  }
+
   app.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) {
       return;
     }
 
-    const taskTab = target.closest(".task-tab");
-    if (taskTab instanceof HTMLElement && taskTab.dataset.taskId) {
-      vscode.postMessage({ type: "switchTask", taskId: taskTab.dataset.taskId });
+    const selectTrigger = target.closest(".select-trigger");
+    if (selectTrigger instanceof HTMLElement) {
+      const selectId = selectTrigger.dataset.selectTrigger;
+      if (!selectId || selectTrigger.hasAttribute("disabled")) {
+        return;
+      }
+      openSelectId = openSelectId === selectId ? null : selectId;
+      scheduleRender();
       return;
     }
 
-    if (!target.classList.contains("code-ref")) {
+    const selectOption = target.closest(".select-option");
+    if (selectOption instanceof HTMLElement) {
+      const selectId = selectOption.dataset.selectOption;
+      const value = selectOption.dataset.selectValue;
+      if (!selectId || value === undefined) {
+        return;
+      }
+
+      openSelectId = null;
+      if (selectId === "mode") {
+        vscode.postMessage({ type: "setMode", value });
+      } else if (selectId === "primaryAgent") {
+        vscode.postMessage({ type: "setPrimaryAgent", value });
+      } else if (selectId === "workMode") {
+        vscode.postMessage({ type: "setSingleAgentMode", value: value === "solo" });
+      }
+      scheduleRender();
+      return;
+    }
+
+    if (openSelectId && !target.closest(".control-select")) {
+      openSelectId = null;
+      scheduleRender();
+    }
+
+    const taskItem = target.closest(".task-item");
+    if (taskItem instanceof HTMLElement && taskItem.dataset.taskId) {
+      setTaskListOpen(false);
+      vscode.postMessage({ type: "switchTask", taskId: taskItem.dataset.taskId });
+      return;
+    }
+
+    const codeRef = target.closest(".code-ref");
+    if (!(codeRef instanceof HTMLElement)) {
       if (target.classList.contains("message-toggle")) {
         const messageId = target.dataset.messageId;
         if (!messageId) {
@@ -487,10 +706,10 @@
         if (!messageId) {
           return;
         }
-        if (collapsedProcesses.has(messageId)) {
-          collapsedProcesses.delete(messageId);
+        if (expandedProcesses.has(messageId)) {
+          expandedProcesses.delete(messageId);
         } else {
-          collapsedProcesses.add(messageId);
+          expandedProcesses.add(messageId);
         }
         scheduleRender();
         return;
@@ -499,8 +718,8 @@
       return;
     }
 
-    const refPath = target.dataset.path;
-    const refLine = target.dataset.line;
+    const refPath = codeRef.dataset.path;
+    const refLine = codeRef.dataset.line;
     if (!refPath || !refLine) {
       return;
     }
@@ -514,6 +733,15 @@
     });
   });
 
+  app.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || !openSelectId) {
+      return;
+    }
+
+    openSelectId = null;
+    scheduleRender();
+  });
+
   window.addEventListener("message", (event) => {
     const message = event.data;
     if (message.type !== "stateUpdate") {
@@ -523,6 +751,15 @@
     ui.tasks = message.value.tasks;
     ui.activeTaskId = message.value.activeTaskId;
     ui.activeTask = message.value.activeTask;
+
+    for (const chatTask of ui.tasks) {
+      for (const chatMessage of chatTask.chat.messages) {
+        if (chatMessage.isStreaming) {
+          expandedProcesses.delete(chatMessage.id);
+        }
+      }
+    }
+
     scheduleRender();
   });
 

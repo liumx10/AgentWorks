@@ -13,6 +13,7 @@ import {
 } from "./types";
 
 const MAX_DISCUSSION_ROUNDS = 4;
+const MAX_TASK_TITLE_LENGTH = 48;
 
 interface PendingTurn {
   mode: WorkMode;
@@ -96,7 +97,7 @@ export class ChatSession {
         attachedContext: this.attachedContext
       })
     );
-    this.deriveTitleFromLatestDeveloperMessage();
+    this.deriveTitleFromFirstDeveloperMessage();
     this.bumpUpdatedAt();
 
     return {
@@ -472,22 +473,22 @@ export class ChatSession {
     return undefined;
   }
 
-  private deriveTitleFromLatestDeveloperMessage(): void {
+  private deriveTitleFromFirstDeveloperMessage(): void {
     if (this.titleWasCustomized) {
       return;
     }
 
-    const latestDeveloperMessage = [...this.messages].reverse().find((message) => message.role === "developer");
-    if (!latestDeveloperMessage) {
+    const firstDeveloperMessage = this.messages.find((message) => message.role === "developer");
+    if (!firstDeveloperMessage) {
       return;
     }
 
-    const normalized = latestDeveloperMessage.content.replace(/\s+/g, " ").trim();
-    if (!normalized) {
+    const derivedTitle = deriveTaskTitle(firstDeveloperMessage.content);
+    if (!derivedTitle) {
       return;
     }
 
-    this.title = normalized.length > 42 ? `${normalized.slice(0, 39)}...` : normalized;
+    this.title = derivedTitle;
   }
 
   private bumpUpdatedAt(): void {
@@ -647,6 +648,24 @@ function phaseForSoloMode(mode: WorkMode): TaskPhase {
     default:
       return "implementing";
   }
+}
+
+function deriveTaskTitle(content: string): string {
+  const normalized = content.replace(/\s+/g, " ").trim();
+  if (!normalized) {
+    return "";
+  }
+
+  const firstSentenceMatch = normalized.match(/^(.+?[。！？!?]|.+?\.(?=\s|$))/);
+  const rawTitle = firstSentenceMatch?.[0] ?? normalized;
+  const strippedPunctuation = rawTitle.replace(/[。！？!?]+$/u, "").replace(/\.(?=\s*$)/u, "").trim();
+  const collapsed = strippedPunctuation || rawTitle.trim();
+
+  if (collapsed.length <= MAX_TASK_TITLE_LENGTH) {
+    return collapsed;
+  }
+
+  return `${collapsed.slice(0, MAX_TASK_TITLE_LENGTH - 3).trimEnd()}...`;
 }
 
 function openingInstruction(role: AgentParticipantRole, mode: WorkMode): string {

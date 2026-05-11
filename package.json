@@ -20,6 +20,7 @@
     "Other"
   ],
   "activationEvents": [
+    "onView:agentWorks.chatView",
     "onCommand:agentWorks.openChat",
     "onCommand:agentWorks.openChatWithSelection",
     "onCommand:agentWorks.openChatWithFile"
@@ -41,7 +42,7 @@
       }
     ],
     "viewsContainers": {
-      "secondarySideBar": [
+      "secondarySidebar": [
         {
           "id": "agentWorksSecondary",
           "title": "AgentWorks",

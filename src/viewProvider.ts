@@ -96,8 +96,22 @@ export class AgentTalkViewProvider implements vscode.WebviewViewProvider {
   }
 
   async reveal(): Promise<void> {
-    await vscode.commands.executeCommand("workbench.view.extension.agentWorksSecondary");
-    await vscode.commands.executeCommand(`${AgentTalkViewProvider.viewId}.focus`);
+    let focused = await this.tryFocusView();
+    if (!focused) {
+      await this.tryExecuteCommand("workbench.action.focusAuxiliaryBar");
+      focused = await this.tryFocusView();
+    }
+    if (!focused) {
+      await this.tryExecuteCommand("workbench.action.toggleAuxiliaryBar");
+      focused = await this.tryFocusView();
+    }
+    if (!focused) {
+      await this.tryExecuteCommand("workbench.view.extension.agentWorksSecondary");
+      focused = await this.tryFocusView();
+    }
+    if (!focused) {
+      throw new Error(`AgentWorks could not reveal view ${AgentTalkViewProvider.viewId}.`);
+    }
     if (this.view) {
       this.render(this.taskManager.getSnapshot());
     }
@@ -125,6 +139,19 @@ export class AgentTalkViewProvider implements vscode.WebviewViewProvider {
       type: "stateUpdate",
       value: snapshot
     });
+  }
+
+  private async tryFocusView(): Promise<boolean> {
+    return this.tryExecuteCommand(`${AgentTalkViewProvider.viewId}.focus`);
+  }
+
+  private async tryExecuteCommand(command: string): Promise<boolean> {
+    try {
+      await vscode.commands.executeCommand(command);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   private async handlePrompt(value: string): Promise<void> {
